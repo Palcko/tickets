@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0b5ed7">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<title>Tickets</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font:18px system-ui,sans-serif;color:#000;background:#fff;padding-bottom:90px}
+header{background:#0b5ed7;color:#fff;padding:14px 16px;font-size:22px;font-weight:700;position:sticky;top:0;z-index:5}
+main{padding:12px 14px;max-width:640px;margin:auto}
+button,.btn{display:block;width:100%;min-height:60px;font:700 20px system-ui;border:3px solid #0b5ed7;background:#fff;color:#0b5ed7;border-radius:14px;margin:10px 0;padding:10px;text-align:center}
+button.pri,.btn.pri{background:#0b5ed7;color:#fff}
+button.red{border-color:#b00020;color:#b00020}
+button:disabled{opacity:.5}
+input,select,textarea{width:100%;min-height:54px;font:20px system-ui;border:2px solid #333;border-radius:10px;padding:8px;margin:4px 0 12px;background:#fff;color:#000}
+label{font-weight:700;display:block}
+.pay{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:4px 0 12px}
+.pay button{margin:0;min-height:56px}
+.pay button.on{background:#0b5ed7;color:#fff}
+.t{border:2px solid #333;border-radius:12px;padding:10px;margin:8px 0}
+.t b{font-size:20px}
+.st{display:inline-block;padding:3px 10px;border-radius:20px;font-size:16px;font-weight:700;color:#fff}
+.attente{background:#c25b00}.envoye{background:#0b7a2f}.gestan{background:#444}
+#msg{background:#fff3cd;border:2px solid #c25b00;border-radius:10px;padding:10px;margin:8px 0;display:none}
+canvas#cv{width:100%;touch-action:none;background:#ccc;border-radius:8px}
+img#res{width:100%;border:2px solid #333}
+.hide{display:none}
+.row{display:flex;gap:8px}.row>*{flex:1}
+</style>
+</head>
+<body>
+<header id="hd">Tickets</header>
+<main>
+<div id="msg"></div>
+
+<!-- LISTE -->
+<section id="v-list">
+  <label class="btn pri" for="cam">📷 Photographier un ticket</label>
+  <input id="cam" type="file" accept="image/*" capture="environment" class="hide">
+  <label class="btn" for="gal" style="font-size:16px;min-height:44px">Choisir une photo existante</label>
+  <input id="gal" type="file" accept="image/*" class="hide">
+  <button id="send">⬆ Envoyer maintenant</button>
+  <div class="row">
+    <input id="q" placeholder="Rechercher">
+    <input id="mois" type="month">
+  </div>
+  <div id="list"></div>
+</section>
+
+<!-- EDITION -->
+<section id="v-edit" class="hide">
+  <div id="crop">
+    <p><b>Déplace les 4 ronds sur les coins du ticket.</b></p>
+    <canvas id="cv"></canvas>
+    <button class="pri" id="apply">✔ Valider le cadrage</button>
+    <label class="btn" for="cam2">↺ Refaire la photo</label>
+    <input id="cam2" type="file" accept="image/*" capture="environment" class="hide">
+  </div>
+  <div id="done" class="hide">
+    <img id="res" alt="Ticket scanné">
+    <button id="readjust">Ajuster les coins</button>
+  </div>
+  <div id="form">
+    <label>Fournisseur</label><input id="f-four" autocomplete="off">
+    <label>Date</label><input id="f-date" type="date">
+    <label>Montant TTC (€)</label><input id="f-mont" inputmode="decimal" placeholder="34,90">
+    <label>Moyen de paiement</label>
+    <div class="pay" id="pay"></div>
+    <label>Chantier / client (facultatif)</label><input id="f-chan">
+    <label>Note (facultatif)</label><input id="f-note">
+    <p id="fname" style="word-break:break-all;color:#555"></p>
+    <label id="gl" class="hide"><input type="checkbox" id="f-gest" style="width:30px;min-height:30px;display:inline-block;vertical-align:middle"> Saisi dans Gestan</label>
+    <button class="pri" id="save">💾 Enregistrer</button>
+    <button class="red" id="del">🗑 Supprimer</button>
+    <button id="back">← Retour</button>
+  </div>
+</section>
+</main>
+
+<script src="config.js"></script>
+<script>
+// ---------- utilitaires ----------
+const $ = id => document.getElementById(id);
+const PAY = ["espèces", "carte", "chèque", "virement"];
+const ST = { attente: "En attente d'envoi", envoye: "Envoyé", gestan: "Saisi dans Gestan" };
+function msg(t) { const m = $("msg"); m.textContent = t || ""; m.style.display = t ? "block" : "none"; }
+
+// ---------- stockage local (IndexedDB) ----------
+const dbp = new Promise((ok, ko) => {
+  const r = indexedDB.open("tickets", 1);
+  r.onupgradeneeded = () => r.result.createObjectStore("t", { keyPath: "id" });
+  r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error);
+});
+async function tx(mode, fn) {
+  const db = await dbp;
+  return new Promise((ok, ko) => { const s = db.transaction("t", mode).objectStore("t"); const r = fn(s); r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error); });
+}
+const dbAll = () => tx("readonly", s => s.getAll());
+const dbPut = t => tx("readwrite", s => s.put(t));
+const dbDel = id => tx("readwrite", s => s.delete(id));
+
+// ---------- scan (port de scan_ticket.py) ----------
+let cvReady = null;
+function loadCV() {
+  return cvReady ||= new Promise((ok, ko) => {
+    const s = document.createElement("script"); s.src = "opencv.js";
+    s.onload = () => { if (cv.Mat) ok(); else if (cv.then) cv.then(c => { window.cv = c; ok(); }); else cv.onRuntimeInitialized = ok; };
+    s.onerror = () => ko(new Error("opencv"));
+    document.head.appendChild(s);
+  });
+}
+async function toCanvas(file) {
+  const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+  let w = bmp.width, h = bmp.height;
+  const k = Math.min(1, 3200 / Math.max(w, h));
+  const rot = w * k > h * k; // script: photo paysage -> rotation 90° horaire
+  const W = Math.round(w * k), H = Math.round(h * k);
+  const c = document.createElement("canvas");
+  c.width = rot ? H : W; c.height = rot ? W : H;
+  const x = c.getContext("2d");
+  if (rot) { x.translate(H, 0); x.rotate(Math.PI / 2); }
+  x.drawImage(bmp, 0, 0, W, H);
+  return c;
+}
+function order(p) { // [x,y]*4 -> tl,tr,br,bl
+  const s = p.map(a => a[0] + a[1]), d = p.map(a => a[1] - a[0]);
+  const mi = a => a.indexOf(Math.min(...a)), ma = a => a.indexOf(Math.max(...a));
+  return [p[mi(s)], p[mi(d)], p[ma(s)], p[ma(d)]];
+}
+function detect(canvas) {
+  const im = cv.imread(canvas), sm = new cv.Mat(), g = new cv.Mat(), th = new cv.Mat();
+  const k = new cv.Mat(), cs = new cv.MatVector(), hi = new cv.Mat();
+  let pts;
+  try {
+    const sc = 1000 / im.cols;
+    cv.resize(im, sm, new cv.Size(0, 0), sc, sc, cv.INTER_LINEAR);
+    cv.cvtColor(sm, g, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(g, g, new cv.Size(9, 9), 0);
+    cv.threshold(g, th, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+    const ker = cv.Mat.ones(25, 25, cv.CV_8U);
+    cv.morphologyEx(th, th, cv.MORPH_CLOSE, ker); ker.delete();
+    cv.findContours(th, cs, hi, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    let best = null, ba = -1;
+    for (let i = 0; i < cs.size(); i++) { const a = cv.contourArea(cs.get(i)); if (a > ba) { ba = a; best = cs.get(i); } }
+    if (!best) throw 0;
+    const hull = new cv.Mat(), ap = new cv.Mat();
+    cv.convexHull(best, hull, false, true);
+    cv.approxPolyDP(hull, ap, 0.02 * cv.arcLength(best, true), true);
+    if (ap.rows === 4) pts = [0, 1, 2, 3].map(i => [ap.data32S[i * 2], ap.data32S[i * 2 + 1]]);
+    else pts = cv.RotatedRect.points(cv.minAreaRect(best)).map(p => [p.x, p.y]);
+    hull.delete(); ap.delete();
+    return order(pts).map(p => [p[0] / sc, p[1] / sc]);
+  } catch (e) {
+    return [[0, 0], [canvas.width, 0], [canvas.width, canvas.height], [0, canvas.height]]; // repli : photo entière
+  } finally { [im, sm, g, th, k, hi].forEach(m => m.delete()); cs.delete(); }
+}
+const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+function warp(canvas, q) {
+  const im = cv.imread(canvas);
+  const W = Math.max(2, Math.floor(Math.max(dist(q[0], q[1]), dist(q[3], q[2]))));
+  const H = Math.max(2, Math.floor(Math.max(dist(q[0], q[3]), dist(q[1], q[2]))));
+  const a = cv.matFromArray(4, 1, cv.CV_32FC2, q.flat());
+  const b = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, W, 0, W, H, 0, H]);
+  const M = cv.getPerspectiveTransform(a, b);
+  const wp = new cv.Mat(), gray = new cv.Mat(), bg = new cv.Mat(), n = new cv.Mat(), n2 = new cv.Mat(), out = new cv.Mat();
+  try {
+    cv.warpPerspective(im, wp, M, new cv.Size(W, H), cv.INTER_CUBIC);
+    const m = Math.floor(W * 0.012);
+    const roi = wp.roi(new cv.Rect(m, m, W - 2 * m, H - 2 * m));
+    cv.cvtColor(roi, gray, cv.COLOR_RGBA2GRAY); roi.delete();
+    cv.resize(gray, bg, new cv.Size(0, 0), 0.1, 0.1, cv.INTER_LINEAR);
+    cv.medianBlur(bg, bg, 31);
+    cv.resize(bg, bg, new cv.Size(gray.cols, gray.rows), 0, 0, cv.INTER_LINEAR);
+    cv.divide(gray, bg, n, 255);
+    n.convertTo(n2, cv.CV_8U, 255 / 95, -150 * 255 / 95);
+    const f = 1100 / n2.cols;
+    cv.resize(n2, out, new cv.Size(1100, Math.round(n2.rows * f)), 0, 0, cv.INTER_AREA);
+    const c = document.createElement("canvas"); cv.imshow(c, out);
+    return new Promise(ok => c.toBlob(ok, "image/jpeg", 0.9));
+  } finally { [im, a, b, M, wp, gray, bg, n, n2, out].forEach(m => m.delete()); }
+}
+
+// ---------- recadrage manuel ----------
+let cur = null; // {id, src:canvas, q, blob, url, ...}
+const cvEl = $("cv"), cx = cvEl.getContext("2d");
+let drag = -1, sc = 1;
+function drawCrop() {
+  cx.drawImage(cur.src, 0, 0, cvEl.width, cvEl.height);
+  cx.lineWidth = 4; cx.strokeStyle = "#0f0"; cx.beginPath();
+  cur.q.forEach((p, i) => cx[i ? "lineTo" : "moveTo"](p[0] * sc, p[1] * sc)); cx.closePath(); cx.stroke();
+  cur.q.forEach(p => { cx.beginPath(); cx.arc(p[0] * sc, p[1] * sc, 26, 0, 7); cx.fillStyle = "rgba(255,0,0,.45)"; cx.fill(); cx.strokeStyle = "#fff"; cx.stroke(); });
+}
+function setupCrop() {
+  const w = Math.min(cur.src.width, 900); sc = w / cur.src.width;
+  cvEl.width = w; cvEl.height = Math.round(cur.src.height * sc);
+  drawCrop();
+}
+function ptr(e) { const r = cvEl.getBoundingClientRect(); return [(e.clientX - r.left) * cvEl.width / r.width / sc, (e.clientY - r.top) * cvEl.height / r.height / sc]; }
+cvEl.onpointerdown = e => { const p = ptr(e); let b = 1e9; cur.q.forEach((c, i) => { const d = dist(c, p); if (d < b) { b = d; drag = i; } }); cvEl.setPointerCapture(e.pointerId); cvEl.onpointermove(e); };
+cvEl.onpointermove = e => { if (drag < 0) return; cur.q[drag] = ptr(e); drawCrop(); };
+cvEl.onpointerup = () => drag = -1;
+
+// ---------- écrans ----------
+const show = v => { ["list", "edit"].forEach(x => $("v-" + x).classList.toggle("hide", x !== v)); window.scrollTo(0, 0); };
+function setPay(p) { cur.pay = p; [...$("pay").children].forEach(b => b.classList.toggle("on", b.dataset.p === p)); }
+PAY.forEach(p => { const b = document.createElement("button"); b.textContent = p; b.dataset.p = p; b.onclick = () => { if (!$("f-four").disabled) { setPay(p); upName(); } }; $("pay").appendChild(b); });
+
+const clean = s => s.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^A-Za-z0-9 ]/g, " ").split(/\s+/).filter(Boolean).map(w => w[0].toUpperCase() + w.slice(1)).join("");
+function montant() { const v = parseFloat($("f-mont").value.replace(/\s/g, "").replace(",", ".")); return isNaN(v) ? null : v.toFixed(2).replace(".", ","); }
+function fname() { return `Ticket_${clean($("f-four").value) || "Inconnu"}_${$("f-date").value || "0000-00-00"}_${montant() || "0,00"}.jpg`; }
+function upName() { $("fname").textContent = fname(); }
+["f-four", "f-date", "f-mont"].forEach(i => $(i).oninput = upName);
+
+async function newPhoto(file) {
+  if (!file) return;
+  msg("Analyse de la photo… (la première fois, quelques secondes)");
+  try {
+    await loadCV();
+    const src = await toCanvas(file);
+    const old = cur;
+    cur = { id: old && old.isNew ? old.id : crypto.randomUUID(), isNew: true, src, q: detect(src), pay: "carte", statut: "attente", cree: new Date().toISOString() };
+    if (old && old.isNew) Object.assign(cur, { four: $("f-four").value, date: $("f-date").value, mont: $("f-mont").value, pay: old.pay, chan: $("f-chan").value, note: $("f-note").value });
+    openEdit(true);
+    msg("");
+  } catch (e) { msg("Erreur : impossible d'analyser la photo."); }
+}
+function openEdit(crop) {
+  $("crop").classList.toggle("hide", !crop); $("done").classList.toggle("hide", crop);
+  $("f-four").value = cur.four || ""; $("f-date").value = cur.date || new Date().toISOString().slice(0, 10);
+  $("f-mont").value = cur.mont || ""; $("f-chan").value = cur.chan || ""; $("f-note").value = cur.note || "";
+  setPay(cur.pay || "carte");
+  const lock = cur.statut !== "attente";
+  ["f-four", "f-date", "f-mont", "f-chan", "f-note"].forEach(i => $(i).disabled = lock);
+  $("save").classList.toggle("hide", lock); $("gl").classList.toggle("hide", !lock); $("f-gest").checked = cur.statut === "gestan";
+  $("form").classList.toggle("hide", crop);
+  if (crop) setupCrop(); else $("res").src = cur.url;
+  upName(); show("edit");
+}
+$("cam").onchange = $("gal").onchange = e => { cur = null; newPhoto(e.target.files[0]); e.target.value = ""; };
+$("cam2").onchange = e => { newPhoto(e.target.files[0]); e.target.value = ""; };
+$("apply").onclick = async () => {
+  $("apply").disabled = true; msg("Scan en cours…");
+  try {
+    cur.blob = await warp(cur.src, cur.q);
+    if (cur.url) URL.revokeObjectURL(cur.url);
+    cur.url = URL.createObjectURL(cur.blob); msg(""); keep(); openEdit(false);
+  } catch (e) { msg("Erreur de scan : ajuste les coins et réessaie."); }
+  $("apply").disabled = false;
+};
+function keep() { cur.four = $("f-four").value; cur.date = $("f-date").value; cur.mont = $("f-mont").value; cur.chan = $("f-chan").value; cur.note = $("f-note").value; }
+$("readjust").onclick = () => { keep(); openEdit(true); };
+$("back").onclick = () => { cur = null; show("list"); render(); };
+$("save").onclick = async () => {
+  keep();
+  if (!cur.blob) return msg("Valide d'abord le cadrage.");
+  if (!cur.four.trim() || montant() === null) return msg("Indique le fournisseur et le montant.");
+  msg("");
+  const { src, url, isNew, q, ...t } = cur;
+  t.fichier = fname(); t.montTxt = montant();
+  await dbPut(t); cur = null; show("list"); await render(); sync(false);
+};
+$("del").onclick = async () => { if (cur && !cur.isNew && confirm("Supprimer ce ticket du téléphone ?")) await dbDel(cur.id); cur = null; show("list"); render(); };
+$("f-gest").onchange = async e => { cur.statut = e.target.checked ? "gestan" : "envoye"; const { src, url, isNew, q, ...t } = cur; await dbPut(t); };
+
+// ---------- liste ----------
+async function render() {
+  let all = (await dbAll()).sort((a, b) => b.date.localeCompare(a.date) || b.cree.localeCompare(a.cree));
+  const q = $("q").value.toLowerCase(), m = $("mois").value;
+  all = all.filter(t => (!m || t.date.startsWith(m)) && (!q || (t.fichier + " " + (t.chan || "") + " " + (t.note || "")).toLowerCase().includes(q)));
+  $("list").innerHTML = "";
+  all.forEach(t => {
+    const d = document.createElement("div"); d.className = "t";
+    d.innerHTML = `<b></b> — ${t.montTxt} €<br>${t.date.split("-").reverse().join("/")} · ${t.pay}<br><span class="st ${t.statut}">${ST[t.statut]}</span>`;
+    d.querySelector("b").textContent = t.four;
+    d.onclick = () => { cur = { ...t, url: URL.createObjectURL(t.blob) }; openEdit(false); };
+    $("list").appendChild(d);
+  });
+  if (!all.length) $("list").innerHTML = "<p>Aucun ticket.</p>";
+}
+$("q").oninput = $("mois").oninput = render;
+
+// ---------- envoi Google Drive ----------
+const SCOPE = "https://www.googleapis.com/auth/drive.file";
+let tok = null, tokExp = 0;
+function getToken(interactive) {
+  if (tok && Date.now() < tokExp) return Promise.resolve(tok);
+  if (!interactive) return Promise.resolve(null);
+  if (!CLIENT_ID) { msg("Envoi Drive pas encore configuré (identifiant Google manquant)."); return Promise.resolve(null); }
+  return new Promise(ok => {
+    const go = () => google.accounts.oauth2.initTokenClient({
+      client_id: CLIENT_ID, scope: SCOPE, login_hint: "saunier.damien.sd@gmail.com",
+      callback: r => { if (r.access_token) { tok = r.access_token; tokExp = Date.now() + (r.expires_in - 60) * 1000; ok(tok); } else ok(null); },
+      error_callback: () => ok(null)
+    }).requestAccessToken();
+    if (window.google && google.accounts) return go();
+    const s = document.createElement("script"); s.src = "https://accounts.google.com/gsi/client"; s.onload = go; s.onerror = () => ok(null); document.head.appendChild(s);
+  });
+}
+const api = (u, o = {}) => fetch(u, { ...o, headers: { ...(o.headers || {}), Authorization: "Bearer " + tok } }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+async function folder(name, parent) {
+  const key = "fid_" + name; let id = localStorage[key];
+  if (id) return id;
+  const qs = `name='${name}' and mimeType='application/vnd.google-apps.folder' and trashed=false` + (parent ? ` and '${parent}' in parents` : "");
+  const r = await api("https://www.googleapis.com/drive/v3/files?fields=files(id)&q=" + encodeURIComponent(qs));
+  id = r.files[0]?.id || (await api("https://www.googleapis.com/drive/v3/files", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, mimeType: "application/vnd.google-apps.folder", ...(parent && { parents: [parent] }) }) })).id;
+  return localStorage[key] = id;
+}
+function upload(name, mime, body, parent) {
+  const b = "tkt" + Date.now(), meta = JSON.stringify({ name, parents: [parent] });
+  const blob = new Blob([`--${b}\r\nContent-Type: application/json\r\n\r\n${meta}\r\n--${b}\r\nContent-Type: ${mime}\r\n\r\n`, body, `\r\n--${b}--`]);
+  return api("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", { method: "POST", headers: { "Content-Type": "multipart/related; boundary=" + b }, body: blob });
+}
+let busy = false;
+async function sync(interactive) {
+  if (busy) return; busy = true;
+  try {
+    const all = await dbAll(), pend = all.filter(t => t.statut === "attente");
+    if (!navigator.onLine) { if (interactive) msg("Pas de réseau : l'envoi se fera dès le retour du réseau."); return; }
+    if (!pend.length && !interactive) return;
+    if (!await getToken(interactive)) { if (pend.length && !interactive) msg(pend.length + " ticket(s) en attente : appuie sur « Envoyer maintenant »."); return; }
+    msg("Envoi en cours…");
+    const fid = await folder("Tickets");
+    for (const t of pend) {
+      await upload(t.fichier, "image/jpeg", t.blob, fid);
+      const j = { fournisseur: t.four, date: t.date, montant_ttc: t.montTxt, moyen_paiement: t.pay, chantier_client: t.chan || "", note: t.note || "", fichier_image: t.fichier, cree_le: t.cree };
+      await upload(t.fichier.replace(/\.jpg$/, ".json"), "application/json", JSON.stringify(j, null, 1), fid);
+      t.statut = "envoye"; await dbPut(t);
+    }
+    // Convention : l'autre session range les tickets traités dans le sous-dossier « Saisis »
+    const sid = await folder("Saisis", fid);
+    const r = await api("https://www.googleapis.com/drive/v3/files?fields=files(name)&pageSize=1000&q=" + encodeURIComponent(`'${sid}' in parents and trashed=false`));
+    const done = new Set(r.files.map(f => f.name));
+    for (const t of await dbAll()) if (t.statut === "envoye" && done.has(t.fichier)) { t.statut = "gestan"; await dbPut(t); }
+    msg(pend.length ? pend.length + " ticket(s) envoyé(s) ✔" : "");
+  } catch (e) { tok = null; msg("L'envoi a échoué (" + e.message + "). Réessaie."); }
+  finally { busy = false; render(); }
+}
+$("send").onclick = () => sync(true);
+addEventListener("online", () => sync(false));
+
+// ---------- démarrage ----------
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
+render();
+</script>
+</body>
+</html>
