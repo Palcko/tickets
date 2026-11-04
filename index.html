@@ -292,7 +292,7 @@ function getToken(interactive) {
   if (!CLIENT_ID) { msg("Envoi Drive pas encore configuré (identifiant Google manquant)."); return Promise.resolve(null); }
   return new Promise(ok => {
     const go = () => google.accounts.oauth2.initTokenClient({
-      client_id: CLIENT_ID, scope: SCOPE, login_hint: "saunier.damien.sd@gmail.com",
+      client_id: CLIENT_ID, scope: SCOPE, login_hint: "saunier.damien@educadom47.com",
       callback: r => { if (r.access_token) { tok = r.access_token; tokExp = Date.now() + (r.expires_in - 60) * 1000; ok(tok); } else ok(null); },
       error_callback: () => ok(null)
     }).requestAccessToken();
@@ -314,6 +314,21 @@ function upload(name, mime, body, parent) {
   const blob = new Blob([`--${b}\r\nContent-Type: application/json\r\n\r\n${meta}\r\n--${b}\r\nContent-Type: ${mime}\r\n\r\n`, body, `\r\n--${b}--`]);
   return api("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", { method: "POST", headers: { "Content-Type": "multipart/related; boundary=" + b }, body: blob });
 }
+const b64 = blob => new Promise(ok => { const r = new FileReader(); r.onload = () => ok(r.result.split(",")[1]); r.readAsDataURL(blob); });
+async function shareNative(pend, interactive) {
+  if (!pend.length) { if (interactive) msg("Rien à envoyer."); return; }
+  if (!interactive) { msg(pend.length + " ticket(s) en attente : appuie sur « Envoyer maintenant »."); return; }
+  const { Filesystem, Share } = Capacitor.Plugins, files = [];
+  for (const t of pend) {
+    const j = { fournisseur: t.four, date: t.date, montant_ttc: t.montTxt, moyen_paiement: t.pay, chantier_client: t.chan || "", note: t.note || "", fichier_image: t.fichier, cree_le: t.cree };
+    for (const [n, d] of [[t.fichier, await b64(t.blob)], [t.fichier.replace(/\.jpg$/, ".json"), btoa(unescape(encodeURIComponent(JSON.stringify(j, null, 1))))]])
+      files.push((await Filesystem.writeFile({ path: n, data: d, directory: "CACHE" })).uri);
+  }
+  await Share.share({ files, dialogTitle: "Choisis Drive, dossier Tickets" });
+  if (!confirm("Les tickets sont-ils bien enregistrés dans Drive ?")) return;
+  for (const t of pend) { t.statut = "envoye"; await dbPut(t); }
+  msg(pend.length + " ticket(s) envoyé(s) ✔");
+}
 let busy = false;
 async function sync(interactive) {
   if (busy) return; busy = true;
@@ -321,6 +336,7 @@ async function sync(interactive) {
     const all = await dbAll(), pend = all.filter(t => t.statut === "attente");
     if (!navigator.onLine) { if (interactive) msg("Pas de réseau : l'envoi se fera dès le retour du réseau."); return; }
     if (!pend.length && !interactive) return;
+    if (window.Capacitor?.isNativePlatform?.()) return await shareNative(pend, interactive); // APK : feuille de partage Android -> Drive
     if (!await getToken(interactive)) { if (pend.length && !interactive) msg(pend.length + " ticket(s) en attente : appuie sur « Envoyer maintenant »."); return; }
     msg("Envoi en cours…");
     const fid = await folder("Tickets");
